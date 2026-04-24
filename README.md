@@ -220,10 +220,10 @@ Open multiple terminal windows and run `node client.js` in each one.
 
 ```sql
 -- Users table
-CREATE TABLE users (
-  phone     TEXT PRIMARY KEY,
-  name      TEXT NOT NULL,
-  nickname  TEXT NOT NULL,
+CREATE TABLE Usuario (
+  telefone     TEXT PRIMARY KEY,
+  nome      TEXT NOT NULL,
+  apelido  TEXT NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
