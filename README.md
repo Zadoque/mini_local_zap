@@ -228,7 +228,7 @@ CREATE TABLE Usuario (
 );
 
 -- Messages table
-CREATE TABLE messages (
+CREATE TABLE Mensagem (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   sender       TEXT NOT NULL,
   recipient    TEXT NOT NULL,
