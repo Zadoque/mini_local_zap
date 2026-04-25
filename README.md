@@ -457,23 +457,33 @@ Open multiple terminal windows and run `node client.js` in each one.
 
 ```sql
 -- Users table
-CREATE TABLE Usuario (
-  telefone     TEXT PRIMARY KEY,
-  nome      TEXT NOT NULL,
-  apelido  TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS Usuario (
+   numero   TEXT PRIMARY KEY,
+   nome     TEXT NOT NULL,
+   apelido  TEXT NOT NULL,
+   online   BOOLEAN DEFAULT 0,
+   vistoPorUltimo TIMESTAMP
+)
+
+-- "ChatsWith" table
+CREATE TABLE IF NOT EXISTS ConversaCom (
+id      INTEGER PRIMARY KEY AUTOINCREMENT,
+numero1 TEXT NOT NULL,
+numero2 TEXT NOT NULL,
+FOREIGN KEY (numero1) REFERENCES Usuario(numero),
+FOREIGN KEY (numero2) REFERENCES Usuario(numero)
 );
 
--- Messages table
-CREATE TABLE Mensagem (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  sender       TEXT NOT NULL,
-  recipient    TEXT NOT NULL,
-  content      TEXT NOT NULL,
-  timestamp    DATETIME DEFAULT CURRENT_TIMESTAMP,
-  status       TEXT DEFAULT 'sent',  -- 'sent' | 'delivered' | 'seen'
-  FOREIGN KEY (sender)    REFERENCES users(phone),
-  FOREIGN KEY (recipient) REFERENCES users(phone)
+CREATE TABLE IF NOT EXISTS Mensagem (
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+msgIdCliente TEXT,
+texto TEXT NOT NULL,
+remetente   TEXT NOT NULL,
+destinatario   TEXT NOT NULL,
+status   TEXT DEFAULT 'enviado',
+time  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+FOREIGN KEY (remetente) REFERENCES Usuario(numero),
+FOREIGN KEY (destinatario) REFERENCES Usuario(numero)
 );
 ```
 
