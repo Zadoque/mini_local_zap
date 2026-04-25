@@ -21,6 +21,11 @@
 - [Overview](#-overview)
 - [Features](#-features)
 - [Architecture](#-architecture)
+  - [System Topology](#system-topology)
+  - [Module Organization](#-module-organization)
+  - [Message Lifecycle](#-message-lifecycle)
+  - [Runtime Flow](#-runtime-flow)
+  - [Module Contracts](#-module-contracts)
 - [Technical Decisions](#-technical-decisions)
 - [Known Limitations](#-known-limitations)
 - [How to Use](#-how-to-use)
@@ -61,7 +66,9 @@ The project was developed as the first assignment for the Distributed Systems co
 
 ## 🏗️ Architecture
 
-The system follows a classic **client-server architecture** with three separated components:
+The system follows a classic **client-server architecture** with three separated components.
+
+### System Topology
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -81,30 +88,260 @@ The system follows a classic **client-server architecture** with three separated
 └──────────────────────────────────────────────┘
 ```
 
-### Message State Flow
-
-Every message follows a strict lifecycle:
-
-```
-[User sends]
-     │
-     ▼
-  📤 SENT          ← message stored in DB; recipient offline or not yet received
-     │
-     ▼ (recipient connects / is online)
-  📬 DELIVERED     ← server pushes message; client ACKs receipt
-     │
-     ▼ (recipient opens the conversation)
-  👁️ SEEN          ← client sends read confirmation; server updates DB and notifies sender
-```
-
-### Component Responsibilities
-
 | Component | Responsibility |
 |---|---|
 | **Client** | Terminal UI, send/receive messages, send ACKs (delivered + seen) |
 | **Server** | Route messages, manage connections, update message states, notify senders |
 | **Database (SQLite3)** | Persist users, messages, conversation history |
+
+---
+
+### 🗂️ Module Organization
+
+The server-side code is split into focused `.mjs` modules. The graph below shows every import relationship — follow the arrows to understand who depends on whom.
+
+```mermaid
+graph TD
+    SERVER["🖥️ server.mjs\nEntry Point"]
+    DISP["📨 dispatcher.mjs"]
+    STATE["🗂️ state.mjs\nclientesAtivos Map"]
+    AUTH["🔐 handlers/auth.mjs"]
+    MSG["💬 handlers/messages.mjs"]
+    USERS["👤 handlers/users.mjs"]
+    COMMS["📡 utils/comms.mjs"]
+    VALID["✅ utils/validation.mjs"]
+    DB["🗄️ db/database.mjs"]
+    QUERIES["📋 db/queries.mjs"]
+    HELPERS["🔧 db/helpers.mjs"]
+
+    SERVER --> DISP
+    SERVER --> USERS
+    SERVER --> COMMS
+
+    DISP --> VALID
+    DISP --> COMMS
+    DISP --> AUTH
+    DISP --> MSG
+    DISP --> USERS
+
+    AUTH --> STATE
+    AUTH --> HELPERS
+    AUTH --> QUERIES
+    AUTH --> COMMS
+
+    MSG --> STATE
+    MSG --> HELPERS
+    MSG --> QUERIES
+    MSG --> COMMS
+
+    USERS --> STATE
+    USERS --> HELPERS
+    USERS --> QUERIES
+    USERS --> COMMS
+
+    HELPERS --> DB
+    HELPERS --> QUERIES
+
+    style SERVER fill:#4a90d9,color:#fff
+    style STATE  fill:#e8a838,color:#fff
+    style DB     fill:#5cb85c,color:#fff
+    style DISP   fill:#9b59b6,color:#fff
+```
+
+Key design decisions visible in this graph:
+
+- `state.mjs` is the **single owner** of the active-connections map — no handler duplicates it
+- `dispatcher.mjs` is a **pure router** — it only imports handlers, never touches the DB directly
+- `db/helpers.mjs` is the **only module that touches the SQLite connection**, keeping DB access centralized
+
+---
+
+### 📨 Message Lifecycle
+
+A message transitions through three states from the moment it is sent until it is read. The diagram below formalises each transition and the trigger that causes it.
+
+```mermaid
+stateDiagram-v2
+    [*] --> enviado : Sender calls envio_de_mensagem
+
+    enviado --> entregue : Recipient online — receives nova_mensagem\nand sends confirmacao_de_recebido
+    enviado --> entregue : Recipient reconnects — finds message\nin login history and sends confirmacao_de_recebido
+
+    entregue --> lido : Recipient opens conversation\nand sends confirmacao_de_leitura
+
+    enviado --> enviado : Recipient still offline\n(message persisted in DB)
+
+    lido --> [*] : Final state (idempotent)
+    entregue --> entregue : Duplicate confirmacao_de_recebido\nignored — idempotent guard
+
+    note right of enviado
+        Sender sees: ✓
+    end note
+    note right of entregue
+        Sender sees: ✓✓
+    end note
+    note right of lido
+        Sender sees: ✓✓ (blue)
+    end note
+```
+
+All transitions are **idempotent**: sending a duplicate confirmation never corrupts the state.
+
+---
+
+### ⏱️ Runtime Flow
+
+The sequence diagram below traces the exact call chain for the most complete scenario: login, sending a message, and both confirmation rounds.
+
+```mermaid
+sequenceDiagram
+    actor A as Cliente A
+    actor B as Cliente B
+    participant WS as server.mjs
+    participant DISP as dispatcher.mjs
+    participant AUTH as handlers/auth.mjs
+    participant MSG as handlers/messages.mjs
+    participant USERS as handlers/users.mjs
+    participant DB as db/ (helpers + queries)
+    participant STATE as state.mjs
+
+    Note over A, STATE: ── LOGIN ─────────────────────────────────────
+    A->>WS: { tipo: "login", numero }
+    WS->>DISP: processaMensagem()
+    DISP->>AUTH: handleLogin()
+    AUTH->>DB: dbGet(userFind)
+    DB-->>AUTH: { usuario }
+    AUTH->>STATE: clientesAtivos.set(numero, ws)
+    AUTH->>DB: dbAll(historico + searchContacts)
+    DB-->>AUTH: mensagens[], contatos[]
+    AUTH->>B: enviar → contato_online
+    AUTH-->>A: sucesso_login + histórico completo
+
+    Note over A, STATE: ── ENVIO DE MENSAGEM ─────────────────────────
+    A->>WS: { tipo: "envio_de_mensagem", texto, destinatario }
+    WS->>DISP: processaMensagem()
+    DISP->>MSG: handleEnvioMensagem()
+    MSG->>DB: dbRun(insertMsg)
+    DB-->>MSG: { lastID: msgIdServidor }
+    MSG-->>A: mensagem_confirmada (status: enviado)
+    MSG->>B: nova_mensagem
+
+    Note over A, STATE: ── CONFIRMAÇÕES ──────────────────────────────
+    B->>WS: { tipo: "confirmacao_de_recebido", msgId }
+    WS->>DISP: processaMensagem()
+    DISP->>MSG: handleConfirmacaoRecebido()
+    MSG->>DB: updateMsgStatus → "entregue"
+    MSG-->>A: atualizacao_status (entregue)
+
+    B->>WS: { tipo: "confirmacao_de_leitura", msgId }
+    WS->>DISP: processaMensagem()
+    DISP->>MSG: handleConfirmacaoLeitura()
+    MSG->>DB: updateMsgStatus → "lido"
+    MSG-->>A: atualizacao_status (lido)
+
+    Note over A, STATE: ── DESCONEXÃO ────────────────────────────────
+    A->>WS: [connection closed]
+    WS->>USERS: handleDesconexao()
+    USERS->>STATE: clientesAtivos.delete(numero)
+    USERS->>DB: updateOnline(0) + updateVistoPorUlt
+    USERS->>B: contato_offline + vistoPorUltimo
+```
+
+Notice how `dispatcher.mjs` acts as the **single entry point** for every incoming message — no handler is called directly from the WebSocket event.
+
+---
+
+### 📐 Module Contracts
+
+The class diagram maps every public export across all modules, making it easy to see what each file exposes and how the layers interconnect.
+
+```mermaid
+classDiagram
+    class state {
+        +Map clientesAtivos
+    }
+
+    class database {
+        +Database db
+    }
+
+    class queries {
+        +string userCreate
+        +string userFind
+        +string updateOnline
+        +string updateVistoPorUlt
+        +string searchContacts
+        +string insertMsg
+        +string findMsg
+        +string updateMsgStatus
+        +string historico
+        +string conversaExiste
+        +string insertConversa
+        +string contatoExiste
+    }
+
+    class helpers {
+        +dbRun(sql, params) Promise
+        +dbGet(sql, params) Promise
+        +dbAll(sql, params) Promise
+    }
+
+    class comms {
+        +enviar(ws, obj) void
+        +erro(ws, msgId, codigo, msg) void
+    }
+
+    class validation {
+        +Map camposObrigatorios
+        +validaCampos(dados) string
+    }
+
+    class auth {
+        +handleLogin(cliente, dados) Promise
+        +handleCadastro(cliente, dados) Promise
+    }
+
+    class messages {
+        +handleEnvioMensagem(cliente, dados) Promise
+        +handleConfirmacaoRecebido(cliente, dados) Promise
+        +handleConfirmacaoLeitura(cliente, dados) Promise
+    }
+
+    class users {
+        +handleBuscarUsuario(cliente, dados) Promise
+        +handleDesconexao(numero) Promise
+    }
+
+    class dispatcher {
+        +processaMensagem(cliente, texto) Promise
+    }
+
+    class server {
+        +WebSocketServer ouvir
+    }
+
+    helpers --> database : uses db
+    helpers --> queries : uses SQL constants
+    auth --> helpers : dbGet / dbRun / dbAll
+    auth --> state : clientesAtivos
+    auth --> comms : enviar / erro
+    messages --> helpers : dbGet / dbRun
+    messages --> state : clientesAtivos
+    messages --> comms : enviar / erro
+    users --> helpers : dbGet / dbRun / dbAll
+    users --> state : clientesAtivos
+    users --> comms : enviar / erro
+    dispatcher --> validation : validaCampos
+    dispatcher --> comms : erro
+    dispatcher --> auth : handleLogin / handleCadastro
+    dispatcher --> messages : handleEnvioMensagem / confirmações
+    dispatcher --> users : handleBuscarUsuario
+    server --> dispatcher : processaMensagem
+    server --> users : handleDesconexao
+    server --> comms : erro
+```
+
+The three handler modules (`auth`, `messages`, `users`) share the same dependency signature — `state + helpers + queries + comms` — which makes adding a new handler entirely predictable.
 
 ---
 
