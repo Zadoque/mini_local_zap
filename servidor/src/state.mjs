@@ -1,0 +1,1 @@
+export const clientesAtivos = new Map(); // numero → websocket

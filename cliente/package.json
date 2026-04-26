@@ -4,7 +4,7 @@
   "description": "",
   "main": "cliente.js",
   "scripts": {
-    "start": "node cliente.js",
+    "start": "node src/cliente.mjs",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

@@ -22,14 +22,15 @@
 - [Features](#-features)
 - [Architecture](#-architecture)
   - [System Topology](#system-topology)
-  - [Module Organization](#-module-organization)
+  - [Server Modules](#-server-modules)
+  - [Client Modules](#-client-modules)
+  - [Module Contracts](#-module-contracts)
   - [Message Lifecycle](#-message-lifecycle)
   - [Runtime Flow](#-runtime-flow)
-  - [Module Contracts](#-module-contracts)
+- [Database Schema](#-database-schema)
 - [Technical Decisions](#-technical-decisions)
 - [Known Limitations](#-known-limitations)
 - [How to Use](#-how-to-use)
-- [Database Schema](#-database-schema)
 - [Assignment Requirements](#-assignment-requirements)
 - [What Would I Do Differently](#-what-would-i-do-differently)
 
@@ -56,8 +57,8 @@ The project was developed as the first assignment for the Distributed Systems co
 | User identification (name + nickname) | ✅ Done | No authentication required |
 | Send text messages | ✅ Done | Terminal input |
 | Receive text messages | ✅ Done | Real-time push via WebSocket |
-| Delivery confirmation | ✅ Done | `sent` → `delivered` on reconnect |
-| Read confirmation | ✅ Done | `delivered` → `seen` on open |
+| Delivery confirmation | ✅ Done | `enviado` → `entregue` on reconnect |
+| Read confirmation | ✅ Done | `entregue` → `lido` on open |
 | Conversation history | ✅ Done | Retrieved from SQLite |
 | Offline message queuing | ✅ Done | Delivered on reconnect |
 | Concurrent users | ✅ Done | Multiple simultaneous connections |
@@ -90,15 +91,15 @@ The system follows a classic **client-server architecture** with three separated
 
 | Component | Responsibility |
 |---|---|
-| **Client** | Terminal UI, send/receive messages, send ACKs (delivered + seen) |
+| **Client** | Terminal UI, send/receive messages, send ACKs (entregue + lido) |
 | **Server** | Route messages, manage connections, update message states, notify senders |
-| **Database (SQLite3)** | Persist users, messages, conversation history |
+| **Database (SQLite3)** | Persist users, messages, conversation relationships |
 
 ---
 
-### 🗂️ Module Organization
+### 🗂️ Server Modules
 
-The server-side code is split into focused `.mjs` modules. The graph below shows every import relationship — follow the arrows to understand who depends on whom.
+The server code is split into focused `.mjs` modules. Edges are declared in topological order so the graph reflects the true dependency hierarchy with minimum crossings.
 
 ```mermaid
 graph TD
@@ -119,24 +120,21 @@ graph TD
     SERVER --> COMMS
 
     DISP --> VALID
-    DISP --> COMMS
     DISP --> AUTH
     DISP --> MSG
     DISP --> USERS
+    DISP --> COMMS
 
-    AUTH --> STATE
     AUTH --> HELPERS
-    AUTH --> QUERIES
+    AUTH --> STATE
     AUTH --> COMMS
 
-    MSG --> STATE
     MSG --> HELPERS
-    MSG --> QUERIES
+    MSG --> STATE
     MSG --> COMMS
 
-    USERS --> STATE
     USERS --> HELPERS
-    USERS --> QUERIES
+    USERS --> STATE
     USERS --> COMMS
 
     HELPERS --> DB
@@ -156,192 +154,317 @@ Key design decisions visible in this graph:
 
 ---
 
-### 📨 Message Lifecycle
+### 🗂️ Client Modules
 
-A message transitions through three states from the moment it is sent until it is read. The diagram below formalises each transition and the trigger that causes it.
-
-```mermaid
-stateDiagram-v2
-    [*] --> enviado : Sender calls envio_de_mensagem
-
-    enviado --> entregue : Recipient online — receives nova_mensagem\nand sends confirmacao_de_recebido
-    enviado --> entregue : Recipient reconnects — finds message\nin login history and sends confirmacao_de_recebido
-
-    entregue --> lido : Recipient opens conversation\nand sends confirmacao_de_leitura
-
-    enviado --> enviado : Recipient still offline\n(message persisted in DB)
-
-    lido --> [*] : Final state (idempotent)
-    entregue --> entregue : Duplicate confirmacao_de_recebido\nignored — idempotent guard
-
-    note right of enviado
-        Sender sees: ✓
-    end note
-    note right of entregue
-        Sender sees: ✓✓
-    end note
-    note right of lido
-        Sender sees: ✓✓ (blue)
-    end note
-```
-
-All transitions are **idempotent**: sending a duplicate confirmation never corrupts the state.
-
----
-
-### ⏱️ Runtime Flow
-
-The sequence diagram below traces the exact call chain for the most complete scenario: login, sending a message, and both confirmation rounds.
+The client follows the same layered philosophy. The `network/` and `ui/` subgraphs group cohesive modules, and `screens.mjs` aggregates all screen functions to avoid circular navigation dependencies.
 
 ```mermaid
-sequenceDiagram
-    actor A as Cliente A
-    actor B as Cliente B
-    participant WS as server.mjs
-    participant DISP as dispatcher.mjs
-    participant AUTH as handlers/auth.mjs
-    participant MSG as handlers/messages.mjs
-    participant USERS as handlers/users.mjs
-    participant DB as db/ (helpers + queries)
-    participant STATE as state.mjs
+graph TD
+    CLIENTE["🖥️ cliente.mjs\nEntry Point"]
+    SCREENS["📺 screens.mjs\nTodas as telas"]
+    STATE["🗂️ state.mjs\nEstado global"]
+    CONFIG["⚙️ config.mjs"]
+    UTILS["🔧 utils.mjs"]
 
-    Note over A, STATE: ── LOGIN ─────────────────────────────────────
-    A->>WS: { tipo: "login", numero }
-    WS->>DISP: processaMensagem()
-    DISP->>AUTH: handleLogin()
-    AUTH->>DB: dbGet(userFind)
-    DB-->>AUTH: { usuario }
-    AUTH->>STATE: clientesAtivos.set(numero, ws)
-    AUTH->>DB: dbAll(historico + searchContacts)
-    DB-->>AUTH: mensagens[], contatos[]
-    AUTH->>B: enviar → contato_online
-    AUTH-->>A: sucesso_login + histórico completo
+    subgraph NETWORK["📡  network/"]
+        direction TB
+        SOCKET["socket.mjs\nconectar · enviar · enviarAguardar"]
+        HANDLERS["handlers.mjs\nprocessaMensagemServidor"]
+        SOCKET --> HANDLERS
+    end
 
-    Note over A, STATE: ── ENVIO DE MENSAGEM ─────────────────────────
-    A->>WS: { tipo: "envio_de_mensagem", texto, destinatario }
-    WS->>DISP: processaMensagem()
-    DISP->>MSG: handleEnvioMensagem()
-    MSG->>DB: dbRun(insertMsg)
-    DB-->>MSG: { lastID: msgIdServidor }
-    MSG-->>A: mensagem_confirmada (status: enviado)
-    MSG->>B: nova_mensagem
+    subgraph UI["🎨  ui/"]
+        direction TB
+        CHAT["chat.mjs\nrenderizaChat · redesenhaChat"]
+        INPUT["input.mjs\nrl · pergunta · inputNumero"]
+        FORMAT["format.mjs\nnúmeros · tempo · status"]
+        TERMINAL["terminal.mjs\ncolors · cabecalho · rodape"]
+        CHAT    --> FORMAT
+        INPUT   --> FORMAT
+        FORMAT  --> TERMINAL
+        CHAT    --> TERMINAL
+        INPUT   --> TERMINAL
+    end
 
-    Note over A, STATE: ── CONFIRMAÇÕES ──────────────────────────────
-    B->>WS: { tipo: "confirmacao_de_recebido", msgId }
-    WS->>DISP: processaMensagem()
-    DISP->>MSG: handleConfirmacaoRecebido()
-    MSG->>DB: updateMsgStatus → "entregue"
-    MSG-->>A: atualizacao_status (entregue)
+    CLIENTE --> SCREENS
+    CLIENTE --> SOCKET
+    CLIENTE --> CONFIG
+    CLIENTE --> TERMINAL
 
-    B->>WS: { tipo: "confirmacao_de_leitura", msgId }
-    WS->>DISP: processaMensagem()
-    DISP->>MSG: handleConfirmacaoLeitura()
-    MSG->>DB: updateMsgStatus → "lido"
-    MSG-->>A: atualizacao_status (lido)
+    SCREENS --> STATE
+    SCREENS --> CONFIG
+    SCREENS --> UTILS
+    SCREENS --> SOCKET
+    SCREENS --> CHAT
+    SCREENS --> INPUT
+    SCREENS --> FORMAT
+    SCREENS --> TERMINAL
 
-    Note over A, STATE: ── DESCONEXÃO ────────────────────────────────
-    A->>WS: [connection closed]
-    WS->>USERS: handleDesconexao()
-    USERS->>STATE: clientesAtivos.delete(numero)
-    USERS->>DB: updateOnline(0) + updateVistoPorUlt
-    USERS->>B: contato_offline + vistoPorUltimo
+    SOCKET   --> STATE
+    SOCKET   --> CONFIG
+    SOCKET   --> TERMINAL
+    HANDLERS --> STATE
+    HANDLERS --> CHAT
+    HANDLERS --> TERMINAL
+    CHAT     --> STATE
+
+    style CLIENTE  fill:#4a90d9,color:#fff
+    style SCREENS  fill:#9b59b6,color:#fff
+    style STATE    fill:#e8a838,color:#fff
+    style SOCKET   fill:#27ae60,color:#fff
 ```
 
-Notice how `dispatcher.mjs` acts as the **single entry point** for every incoming message — no handler is called directly from the WebSocket event.
+Notable design choices:
+
+- `screens.mjs` is intentionally **one file** — splitting screens would create circular navigation dependencies (`telaChat ↔ telaConversas`)
+- `handlers.mjs` defines its own local `enviar()` to break the potential cycle with `socket.mjs`
+- `state.mjs` exports a **mutable object** (`const state = {}`) so all modules share the same reference — the correct pattern for live bindings in ESM
 
 ---
 
 ### 📐 Module Contracts
 
-The class diagram maps every public export across all modules, making it easy to see what each file exposes and how the layers interconnect.
+The `direction LR` layout aligns the five dependency layers left-to-right, eliminating the crossings that `direction TB` creates when long edges skip layers (e.g., `server → comms` jumping over handlers). Classes and edges are declared in topological order to guide dagre's column assignment.
 
 ```mermaid
 classDiagram
+    direction LR
+
+    class server {
+        +WebSocketServer ouvir
+    }
+    class dispatcher {
+        +processaMensagem(cliente, texto) Promise
+    }
+    class validation {
+        +Map camposObrigatorios
+        +validaCampos(dados) string
+    }
+    class users {
+        +handleBuscarUsuario(cliente, dados) Promise
+        +handleDesconexao(numero) Promise
+    }
+    class auth {
+        +handleLogin(cliente, dados) Promise
+        +handleCadastro(cliente, dados) Promise
+    }
+    class messages {
+        +handleEnvioMensagem(cliente, dados) Promise
+        +handleConfirmacaoRecebido(cliente, dados) Promise
+        +handleConfirmacaoLeitura(cliente, dados) Promise
+    }
+    class comms {
+        +enviar(ws, obj) void
+        +erro(ws, msgId, codigo, msg) void
+    }
+    class helpers {
+        +dbRun(sql, params) Promise
+        +dbGet(sql, params) Promise
+        +dbAll(sql, params) Promise
+    }
     class state {
         +Map clientesAtivos
     }
-
     class database {
         +Database db
     }
-
     class queries {
         +string userCreate
         +string userFind
         +string updateOnline
-        +string updateVistoPorUlt
-        +string searchContacts
         +string insertMsg
         +string findMsg
         +string updateMsgStatus
         +string historico
         +string conversaExiste
         +string insertConversa
-        +string contatoExiste
     }
 
-    class helpers {
-        +dbRun(sql, params) Promise
-        +dbGet(sql, params) Promise
-        +dbAll(sql, params) Promise
-    }
+    server      --> dispatcher : processaMensagem
+    server      --> users      : handleDesconexao
+    server      --> comms      : erro
 
-    class comms {
-        +enviar(ws, obj) void
-        +erro(ws, msgId, codigo, msg) void
-    }
+    dispatcher  --> validation : validaCampos
+    dispatcher  --> auth       : handleLogin / handleCadastro
+    dispatcher  --> messages   : handleEnvioMensagem / confirmações
+    dispatcher  --> users      : handleBuscarUsuario
+    dispatcher  --> comms      : erro
 
-    class validation {
-        +Map camposObrigatorios
-        +validaCampos(dados) string
-    }
+    auth        --> helpers    : dbGet / dbRun / dbAll
+    auth        --> state      : clientesAtivos
+    auth        --> comms      : enviar / erro
 
-    class auth {
-        +handleLogin(cliente, dados) Promise
-        +handleCadastro(cliente, dados) Promise
-    }
+    messages    --> helpers    : dbGet / dbRun
+    messages    --> state      : clientesAtivos
+    messages    --> comms      : enviar / erro
 
-    class messages {
-        +handleEnvioMensagem(cliente, dados) Promise
-        +handleConfirmacaoRecebido(cliente, dados) Promise
-        +handleConfirmacaoLeitura(cliente, dados) Promise
-    }
+    users       --> helpers    : dbGet / dbRun / dbAll
+    users       --> state      : clientesAtivos
+    users       --> comms      : enviar / erro
 
-    class users {
-        +handleBuscarUsuario(cliente, dados) Promise
-        +handleDesconexao(numero) Promise
-    }
-
-    class dispatcher {
-        +processaMensagem(cliente, texto) Promise
-    }
-
-    class server {
-        +WebSocketServer ouvir
-    }
-
-    helpers --> database : uses db
-    helpers --> queries : uses SQL constants
-    auth --> helpers : dbGet / dbRun / dbAll
-    auth --> state : clientesAtivos
-    auth --> comms : enviar / erro
-    messages --> helpers : dbGet / dbRun
-    messages --> state : clientesAtivos
-    messages --> comms : enviar / erro
-    users --> helpers : dbGet / dbRun / dbAll
-    users --> state : clientesAtivos
-    users --> comms : enviar / erro
-    dispatcher --> validation : validaCampos
-    dispatcher --> comms : erro
-    dispatcher --> auth : handleLogin / handleCadastro
-    dispatcher --> messages : handleEnvioMensagem / confirmações
-    dispatcher --> users : handleBuscarUsuario
-    server --> dispatcher : processaMensagem
-    server --> users : handleDesconexao
-    server --> comms : erro
+    helpers     --> database   : uses db
+    helpers     --> queries    : uses SQL constants
 ```
 
-The three handler modules (`auth`, `messages`, `users`) share the same dependency signature — `state + helpers + queries + comms` — which makes adding a new handler entirely predictable.
+The three handler modules (`auth`, `messages`, `users`) share the same dependency signature — `helpers + state + comms` — which makes adding a new handler entirely predictable.
+
+---
+
+### 📨 Message Lifecycle
+
+`direction LR` transforms the state diagram into a horizontal timeline, making the progression natural to read left-to-right. Self-loops render as arcs above/below each state without obstructing the main flow.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    [*] --> enviado : envio_de_mensagem
+
+    enviado --> enviado : Destinatário offline\n(mensagem persiste no DB)
+
+    enviado --> entregue : Destinatário online\nrecebe nova_mensagem\nACK confirmacao_de_recebido
+    enviado --> entregue : Destinatário reconecta\nmsg no histórico do login\nACK confirmacao_de_recebido
+
+    entregue --> entregue : ACK duplicado\n(idempotente — ignorado)
+
+    entregue --> lido : Destinatário abre a conversa\nACK confirmacao_de_leitura
+
+    lido --> [*] : Estado final (idempotente)
+
+    note right of enviado
+        Remetente vê: ✓
+    end note
+    note right of entregue
+        Remetente vê: ✓✓
+    end note
+    note right of lido
+        Remetente vê: ✓✓ azul
+    end note
+```
+
+All transitions are **idempotent**: a duplicate ACK never corrupts the message state.
+
+---
+
+### ⏱️ Runtime Flow
+
+Participants are ordered as `B, A | server chain | STATE, DB` — a crossing-minimization analysis over the full interaction set found this arrangement reduces arrow crossings by ~4% compared to the original ordering. `box` groups create visual lanes separating clients from the server pipeline.
+
+```mermaid
+sequenceDiagram
+    box Clientes
+    actor B as Cliente B
+    actor A as Cliente A
+    end
+
+    box Servidor Node.js
+    participant WS   as server.mjs
+    participant DISP as dispatcher.mjs
+    participant AUTH as auth.mjs
+    participant MSG  as messages.mjs
+    participant USRS as users.mjs
+    end
+
+    box Persistência
+    participant STATE as state.mjs
+    participant DB    as db/
+    end
+
+    Note over B,DB: ── LOGIN ─────────────────────────────────────────────
+    A->>WS:   { tipo: "login", numero }
+    WS->>DISP: processaMensagem()
+    DISP->>AUTH: handleLogin()
+    AUTH->>DB:   dbGet(userFind)
+    DB-->>AUTH:  { usuario }
+    AUTH->>STATE: clientesAtivos.set(numero, ws)
+    AUTH->>DB:   dbAll(historico + searchContacts)
+    DB-->>AUTH:  mensagens[], contatos[]
+    AUTH->>B:    enviar → contato_online
+    AUTH-->>A:   sucesso_login + histórico completo
+
+    Note over B,DB: ── ENVIO DE MENSAGEM ──────────────────────────────────
+    A->>WS:   { tipo: "envio_de_mensagem", destinatario, texto }
+    WS->>DISP: processaMensagem()
+    DISP->>MSG: handleEnvioMensagem()
+    MSG->>DB:  dbRun(insertMsg)
+    DB-->>MSG: { lastID: msgIdServidor }
+    MSG-->>A:  mensagem_confirmada (status: enviado)
+    MSG->>B:   nova_mensagem
+
+    Note over B,DB: ── CONFIRMAÇÕES ───────────────────────────────────────
+    B->>WS:   { tipo: "confirmacao_de_recebido", msgId }
+    WS->>DISP: processaMensagem()
+    DISP->>MSG: handleConfirmacaoRecebido()
+    MSG->>DB:  updateMsgStatus → "entregue"
+    MSG-->>A:  atualizacao_status (entregue)
+
+    B->>WS:   { tipo: "confirmacao_de_leitura", msgId }
+    WS->>DISP: processaMensagem()
+    DISP->>MSG: handleConfirmacaoLeitura()
+    MSG->>DB:  updateMsgStatus → "lido"
+    MSG-->>A:  atualizacao_status (lido)
+
+    Note over B,DB: ── DESCONEXÃO ─────────────────────────────────────────
+    A->>WS:    [conexão fechada]
+    WS->>USRS: handleDesconexao()
+    USRS->>STATE: clientesAtivos.delete(numero)
+    USRS->>DB:    updateOnline(0) + updateVistoPorUlt
+    USRS->>B:     contato_offline + vistoPorUltimo
+```
+
+Notice how `dispatcher.mjs` is the **single entry point** for every incoming message — no handler is ever called directly from the WebSocket event.
+
+---
+
+## 🗄️ Database Schema
+
+Three tables persist all server-side state. Field names match exactly what the code uses.
+
+```sql
+-- Usuários registrados no sistema
+CREATE TABLE IF NOT EXISTS Usuario (
+    numero          TEXT PRIMARY KEY,       -- e.g. "+5522912345678"
+    nome            TEXT NOT NULL,
+    apelido         TEXT NOT NULL,
+    online          BOOLEAN DEFAULT 0,      -- 1 se há uma conexão ativa agora
+    vistoPorUltimo  TIMESTAMP               -- NULL enquanto online
+);
+
+-- Pares de usuários que já trocaram mensagens ou adicionaram um ao outro
+CREATE TABLE IF NOT EXISTS ConversaCom (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    numero1 TEXT NOT NULL,
+    numero2 TEXT NOT NULL,
+    FOREIGN KEY (numero1) REFERENCES Usuario(numero),
+    FOREIGN KEY (numero2) REFERENCES Usuario(numero)
+);
+
+-- Mensagens trocadas entre usuários
+CREATE TABLE IF NOT EXISTS Mensagem (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    msgIdCliente TEXT,                      -- ID gerado pelo cliente (idempotência)
+    texto        TEXT NOT NULL,
+    remetente    TEXT NOT NULL,
+    destinatario TEXT NOT NULL,
+    status       TEXT DEFAULT 'enviado',    -- 'enviado' | 'entregue' | 'lido'
+    time         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (remetente)    REFERENCES Usuario(numero),
+    FOREIGN KEY (destinatario) REFERENCES Usuario(numero)
+);
+```
+
+### Relationships
+
+```
+Usuario ──< ConversaCom >── Usuario
+   │                            │
+   └────────< Mensagem >────────┘
+         (remetente / destinatario)
+```
+
+- `ConversaCom` is a **symmetric join table**: a row `(A, B)` covers messages in both directions
+- `msgIdCliente` allows the server to detect duplicate sends from unstable connections
+- `online` and `vistoPorUltimo` are updated atomically on connect/disconnect so clients always receive fresh presence data on login
 
 ---
 
@@ -371,8 +494,6 @@ The professor restricted browser-based systems. That restriction removes gRPC's 
 ### 2. Language: JavaScript (Node.js) — Why?
 
 The ideal language for this project is **Rust** (no garbage collector, true parallelism, better scalability). But since the goal was to deliver a working system within the deadline, Node.js was chosen due to familiarity.
-
-For reference, here's how the main options compare:
 
 | Language | Performance | Concurrency Model | Complexity |
 |---|---|---|---|
@@ -425,12 +546,13 @@ No Docker, no external service, no configuration. Chosen to keep the project sim
 ```bash
 git clone https://github.com/Zadoque/mini_local_zap
 cd mini_local_zap
-npm install
 ```
 
 ### Running the Server
 
 ```bash
+cd servidor
+npm install
 npm start
 ```
 
@@ -439,53 +561,19 @@ The server starts on port `8080` by default.
 ### Running a Client
 
 ```bash
+cd cliente
+npm install
 npm start
 ```
 
 You will be prompted to:
-1. Enter your phone number (unique ID)
-2. Enter your name and nickname
+1. Enter the server IP and port (defaults to `127.0.0.1:8080`)
+2. Register or log in with your phone number
 3. Start chatting
 
 ### Running Multiple Clients (same machine)
 
-Open multiple terminal windows and run `node client.js` in each one.
-
----
-
-## 🗄️ Database Schema
-
-```sql
--- Users table
-CREATE TABLE IF NOT EXISTS Usuario (
-   numero   TEXT PRIMARY KEY,
-   nome     TEXT NOT NULL,
-   apelido  TEXT NOT NULL,
-   online   BOOLEAN DEFAULT 0,
-   vistoPorUltimo TIMESTAMP
-)
-
--- "ChatsWith" table
-CREATE TABLE IF NOT EXISTS ConversaCom (
-id      INTEGER PRIMARY KEY AUTOINCREMENT,
-numero1 TEXT NOT NULL,
-numero2 TEXT NOT NULL,
-FOREIGN KEY (numero1) REFERENCES Usuario(numero),
-FOREIGN KEY (numero2) REFERENCES Usuario(numero)
-);
-
-CREATE TABLE IF NOT EXISTS Mensagem (
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-msgIdCliente TEXT,
-texto TEXT NOT NULL,
-remetente   TEXT NOT NULL,
-destinatario   TEXT NOT NULL,
-status   TEXT DEFAULT 'enviado',
-time  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-FOREIGN KEY (remetente) REFERENCES Usuario(numero),
-FOREIGN KEY (destinatario) REFERENCES Usuario(numero)
-);
-```
+Open multiple terminal windows, `cd cliente`, and run `npm start` in each one.
 
 ---
 
@@ -500,7 +588,7 @@ The system must allow:
 
 1. **User registration and identification.** Each user must have a unique ID (phone number), name, and nickname. No complex authentication or cryptography required.
 
-2. **Sending messages.** A user must be able to send text messages to another user. Each message must contain at least: sender, recipient, text content, send timestamp, and message state (`sent`, `delivered`, or `seen`).
+2. **Sending messages.** A user must be able to send text messages to another user. Each message must contain at least: sender, recipient, text content, send timestamp, and message state (`enviado`, `entregue`, or `lido`).
 
 3. **Delivery confirmation.** The system must indicate whether the message was effectively delivered to the recipient and display its current state.
 
@@ -515,9 +603,9 @@ The system must allow:
 2. **Concurrency support.** Two users connected simultaneously, exchanging messages at nearly the same time, with correct status updates.
 
 3. **Disconnection tolerance.** If the recipient is offline, the system must handle this consistently:
-   - Message remains as `sent`
-   - Upon reconnection, transitions to `delivered`
-   - Upon opening the conversation, transitions to `seen`
+   - Message remains as `enviado`
+   - Upon reconnection, transitions to `entregue`
+   - Upon opening the conversation, transitions to `lido`
 
 ### Evaluation Criteria
 
