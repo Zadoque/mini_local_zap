@@ -25,10 +25,6 @@ export async function handleLogin(cliente, dados) {
     const mensagens = await dbAll(SQL.historico, [numero, numero]);
     const contatos  = conversas.map(c => c.numero1 === numero ? c.numero2 : c.numero1);
 
-    contatos.forEach(contato => {
-        const conexaoContato = clientesAtivos.get(contato);
-        if (conexaoContato) enviar(conexaoContato, { tipo: 'contato_online', numero });
-    });
 
     const contatosEnriquecidos = await Promise.all(contatos.map(async (num) => {
         const info  = await dbGet(SQL.userFind, [num]) ?? {};

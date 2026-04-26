@@ -223,14 +223,12 @@ async function telaConversas() {
     if (lista.length === 0) info('Nenhuma conversa ainda.');
 
     lista.forEach(({ num, c, preview, ultima, naolidas }, i) => {
-        const statusStr = c.online
-            ? C.green + 'Online' + C.reset
-            : C.gray  + (c.vistoPorUltimo ? 'Visto ' + formataTempo(c.vistoPorUltimo) : 'Offline') + C.reset;
+        
         const badge   = naolidas > 0 ? C.teal + ` [${naolidas}]` + C.reset : '';
         const horaMsg = ultima ? C.gray + formataTempo(ultima.time) + C.reset : '';
         console.log(
             `  ${C.bold}${i + 1}.${C.reset}  ${C.white}${c.nome}${C.reset} ${C.gray}(${formataNumeroBR(num)})${C.reset}` +
-            `  ──  ${statusStr}${badge}`
+            `  ──  ${badge}`
         );
         if (preview) console.log(`       ${C.dim}${preview}${C.reset}  ${horaMsg}`);
         console.log();
@@ -242,7 +240,10 @@ async function telaConversas() {
     const op = (await pergunta('  Escolha: ')).trim();
     if (op === '0' || op === '') return telaMenu();
     const idx = parseInt(op) - 1;
-    if (idx >= 0 && idx < lista.length) return telaChat(lista[idx].num);
+    if (idx >= 0 && idx < lista.length){
+        enviar({ tipo: 'pergunta_se_esta_online', numero: lista[idx].num});
+        return telaChat(lista[idx].num);
+    } 
     return telaConversas();
 }
 
@@ -269,7 +270,10 @@ async function telaContatos() {
     if (op === '0' || op === '') return telaMenu();
     const idx = parseInt(op) - 1;
     if (idx === lista.length) return telaAdicionarContato();
-    if (idx >= 0 && idx < lista.length) return telaChat(lista[idx]);
+    if (idx >= 0 && idx < lista.length) {
+        //Pergunto para o servidor se o contato está online
+        return telaChat(lista[idx]);
+    }
     return telaContatos();
 }
 

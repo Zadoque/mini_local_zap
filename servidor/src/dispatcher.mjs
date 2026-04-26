@@ -3,6 +3,7 @@ import { erro } from './utils/comms.mjs';
 import { handleLogin, handleCadastro } from './handlers/auth.mjs';
 import { handleEnvioMensagem, handleConfirmacaoRecebido, handleConfirmacaoLeitura } from './handlers/messages.mjs';
 import { handleBuscarUsuario } from './handlers/users.mjs';
+import { onPerguntaSeTaOnline } from './handlers/on-offline_user.mjs';
 
 export async function processaMensagem(cliente, mensagemTexto) {
     let dados;
@@ -25,6 +26,7 @@ export async function processaMensagem(cliente, mensagemTexto) {
     }
 
     switch (dados.tipo) {
+        case 'pergunta_se_esta_online': await onPerguntaSeTaOnline(cliente, dados);      break;
         case 'login':                   await handleLogin(cliente, dados);               break;
         case 'cadastro':                await handleCadastro(cliente, dados);            break;
         case 'envio_de_mensagem':       await handleEnvioMensagem(cliente, dados);       break;
